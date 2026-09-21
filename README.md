@@ -154,4 +154,14 @@ marker, and exporting it is unremarkable.
 
 ## Files
 
-- [`outlook-vba/ThisOutlookSession.vba`](outlook-vba/ThisOutlookSession.vba) — paste into `ThisOutlookSession`
+Both go in the same place — **Alt+F11 → Project1 → Microsoft Outlook Objects →
+ThisOutlookSession**. Pick one, not both.
+
+| File | Lines | Use it when |
+|---|---|---|
+| [`outlook-vba/Minimal.vba`](outlook-vba/Minimal.vba) | ~105 | You just want: open a Confidential message → PDF in a folder. Matches the classic sensitivity flag only. |
+| [`outlook-vba/ThisOutlookSession.vba`](outlook-vba/ThisOutlookSession.vba) | ~470 | You need Purview/AIP label matching, rights-protected handling, arrival/preview triggers, logging, or the diagnostic macros. |
+
+Start with `Minimal.vba`. Move up if it doesn't catch your mail — that usually
+means your "Confidential" is a Purview label rather than the sensitivity flag,
+which only the full version reads.

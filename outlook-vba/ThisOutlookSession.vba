@@ -163,6 +163,12 @@ End Sub
 
 Private Sub HandleMail(ByVal Mail As Outlook.MailItem)
     On Error Resume Next
+
+    ' NewInspector also fires for a message you are COMPOSING. Marking a draft
+    ' Confidential as you write it would otherwise export the half-finished
+    ' text. .Sent is False only for drafts, so this keeps us to real mail.
+    If Mail.Sent = False Then Exit Sub
+
     If Not IsConfidential(Mail) Then Exit Sub
     ExportMail Mail, False
 End Sub
