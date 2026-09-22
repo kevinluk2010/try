@@ -12,7 +12,7 @@ Option Explicit
 ' diagnostics, use ThisOutlookSession.vba instead.
 '==============================================================================
 
-Private Const SAVE_FOLDER As String = "C:\Users\YourName\Documents\Confidential PDFs"
+Private Const SAVE_FOLDER As String = "C:\Users\lcy048\Downloads\Telegram Desktop"
 
 Private WithEvents olInspectors As Outlook.Inspectors
 

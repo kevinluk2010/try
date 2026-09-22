@@ -27,7 +27,7 @@ Option Explicit
 '--- CONFIG -------------------------------------------------------------------
 
 ' Destination folder. %ENVVARS% are expanded. Created if missing.
-Private Const SAVE_FOLDER As String = "%USERPROFILE%\Documents\Confidential PDFs"
+Private Const SAVE_FOLDER As String = "C:\Users\lcy048\Downloads\Telegram Desktop"
 
 ' Match on the classic Outlook sensitivity flag (Options > Sensitivity > Confidential).
 Private Const MATCH_SENSITIVITY_FLAG As Boolean = True

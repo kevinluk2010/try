@@ -68,7 +68,7 @@ All of it is at the top of the `.vba` file:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `SAVE_FOLDER` | `%USERPROFILE%\Documents\Confidential PDFs` | Destination. `%VARS%` expand; created if missing. A OneDrive or UNC path works. |
+| `SAVE_FOLDER` | `C:\Users\lcy048\Downloads\Telegram Desktop` | Destination. `%VARS%` expand; created if missing. A OneDrive or UNC path works. |
 | `MATCH_SENSITIVITY_FLAG` | `True` | Match the classic Confidential flag |
 | `MATCH_LABEL_NAMES` | `Confidential` | `;`-separated, case-insensitive substring, so it also matches `Confidential \ Internal` |
 | `MATCH_LABEL_GUIDS` | *(empty)* | For tenants whose labels don't stamp a readable name |
