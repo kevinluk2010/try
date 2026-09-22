@@ -4,23 +4,14 @@ Option Explicit
 ' Auto-export "Confidential" mail to PDF
 '
 ' WHERE THIS GOES
-'   Classic Outlook for Windows only (the desktop app with File > Options >
-'   Trust Center). Alt+F11 -> Project1 -> Microsoft Outlook Objects ->
-'   ThisOutlookSession. Paste this whole file there, save, restart Outlook.
-'   The "new Outlook" for Windows, Outlook on the web, and Outlook for Mac
-'   have no VBA -- see README.md for the Power Automate route.
+'   Classic Outlook for Windows only. Alt+F11 -> Project1 ->
+'   Microsoft Outlook Objects -> ThisOutlookSession. Paste this whole file
+'   there, save, restart Outlook.
 '
-' WHAT IT DOES
-'   Watches for messages Outlook considers confidential and writes a PDF of
-'   each one into SAVE_FOLDER. The PDF is produced by saving the message as
-'   MHTML and having Word export it as a fixed-format PDF, which keeps the
-'   From/To/Sent/Subject header block that Outlook's own printout has.
-'
-' WHAT IT DELIBERATELY DOES NOT DO
-'   Rights-protected mail (IRM / "Do Not Forward" / encrypted) is skipped by
-'   default. Exporting it to a plain file removes exactly the protection the
-'   sender applied, and may be blocked by your tenant anyway. Flip
-'   SKIP_RIGHTS_PROTECTED only if you know your policy permits it.
+' IF IT DOES NOT WORK
+'   Select a confidential email in Outlook, then in the VBA editor press F5
+'   and run RunDiagnostics. It reports which step is failing.
+'   Everything is also logged to LOG_FILE (see CONFIG). OpenLog shows it.
 '==============================================================================
 
 
@@ -37,11 +28,11 @@ Private Const MATCH_SENSITIVITY_FLAG As Boolean = True
 ' "Confidential \ Internal". Leave "" to disable label matching.
 Private Const MATCH_LABEL_NAMES As String = "Confidential"
 
-' Optional: match specific label GUIDs instead of / as well as names, for tenants
-' whose labels do not stamp a readable name. Semicolon-separated, no braces.
+' Optional: match specific label GUIDs as well as names, for tenants whose
+' labels do not stamp a readable name. Semicolon-separated, no braces.
 Private Const MATCH_LABEL_GUIDS As String = ""
 
-' Skip encrypted / rights-managed mail. Read the header comment before changing.
+' Skip encrypted / rights-managed mail.
 Private Const SKIP_RIGHTS_PROTECTED As Boolean = True
 
 ' Triggers.
@@ -49,8 +40,8 @@ Private Const EXPORT_ON_OPEN As Boolean = True      ' opened in its own window
 Private Const EXPORT_ON_PREVIEW As Boolean = False  ' selected in the reading pane
 Private Const EXPORT_ON_ARRIVAL As Boolean = False  ' lands in the Inbox, unopened
 
-' Optional log file for troubleshooting. "" disables logging.
-Private Const LOG_FILE As String = ""
+' Log file. ON by default -- without it, failures are invisible.
+Private Const LOG_FILE As String = "%TEMP%\outlook-pdf-export.log"
 
 '--- END CONFIG ---------------------------------------------------------------
 
@@ -58,6 +49,9 @@ Private Const LOG_FILE As String = ""
 Private WithEvents olInspectors As Outlook.Inspectors
 Private WithEvents olExplorer As Outlook.Explorer
 Private WithEvents olInboxItems As Outlook.Items
+
+' Why the last export attempt did what it did. Read by RunDiagnostics.
+Private gLastReason As String
 
 
 '==============================================================================
@@ -68,43 +62,185 @@ Private Sub Application_Startup()
     HookEvents
 End Sub
 
-' Public so you can re-run it from the VBA editor (F5) without restarting Outlook.
+' Public so you can run it with F5 instead of restarting Outlook.
 Public Sub HookEvents()
-    On Error Resume Next
+    On Error GoTo Fail
 
     Set olInspectors = Application.Inspectors
     Set olExplorer = Application.ActiveExplorer
 
     If EXPORT_ON_ARRIVAL Then
-        Set olInboxItems = Application.Session _
-            .GetDefaultFolder(olFolderInbox).Items
+        Set olInboxItems = Application.Session.GetDefaultFolder(olFolderInbox).Items
     End If
 
-    LogLine "hooked; save folder = " & ExpandEnv(SAVE_FOLDER)
+    LogLine "--- hooked. dest=" & ExpandEnv(SAVE_FOLDER) & _
+            " onOpen=" & EXPORT_ON_OPEN & " onPreview=" & EXPORT_ON_PREVIEW & _
+            " onArrival=" & EXPORT_ON_ARRIVAL
+    Exit Sub
+
+Fail:
+    LogLine "HookEvents ERROR " & Err.Number & ": " & Err.Description
 End Sub
 
 Private Sub olInspectors_NewInspector(ByVal Inspector As Outlook.Inspector)
     If Not EXPORT_ON_OPEN Then Exit Sub
-    On Error Resume Next
+
     Dim itm As Object
+    On Error GoTo Fail
+
     Set itm = Inspector.CurrentItem
-    If itm Is Nothing Then Exit Sub
-    If TypeOf itm Is Outlook.MailItem Then HandleMail itm
+    If itm Is Nothing Then
+        LogLine "NewInspector fired but CurrentItem is Nothing"
+        Exit Sub
+    End If
+
+    If Not TypeOf itm Is Outlook.MailItem Then Exit Sub
+
+    LogLine "NewInspector: mail opened"
+    HandleMail itm
+    Exit Sub
+
+Fail:
+    LogLine "NewInspector ERROR " & Err.Number & ": " & Err.Description
 End Sub
 
 Private Sub olExplorer_SelectionChange()
     If Not EXPORT_ON_PREVIEW Then Exit Sub
-    On Error Resume Next
+
     Dim sel As Outlook.Selection
+    On Error GoTo Fail
+
     Set sel = olExplorer.Selection
     If sel Is Nothing Then Exit Sub
     If sel.Count <> 1 Then Exit Sub
-    If TypeOf sel.Item(1) Is Outlook.MailItem Then HandleMail sel.Item(1)
+    If Not TypeOf sel.Item(1) Is Outlook.MailItem Then Exit Sub
+
+    HandleMail sel.Item(1)
+    Exit Sub
+
+Fail:
+    LogLine "SelectionChange ERROR " & Err.Number & ": " & Err.Description
 End Sub
 
 Private Sub olInboxItems_ItemAdd(ByVal Item As Object)
+    On Error GoTo Fail
+
+    If Not TypeOf Item Is Outlook.MailItem Then Exit Sub
+
+    LogLine "ItemAdd: mail arrived"
+    HandleMail Item
+    Exit Sub
+
+Fail:
+    LogLine "ItemAdd ERROR " & Err.Number & ": " & Err.Description
+End Sub
+
+
+'==============================================================================
+' DIAGNOSTICS -- run this with F5 when nothing is being saved
+'==============================================================================
+
+Public Sub RunDiagnostics()
+    Dim r As String, dest As String, tmp As String
+    Dim fso As Object, wd As Object, startedWord As Boolean
+    Dim m As Object, sel As Outlook.Selection
+
+    r = "PDF EXPORT DIAGNOSTICS" & vbCrLf & _
+        "----------------------------------------" & vbCrLf & vbCrLf
+
+    '-- 1. Did Application_Startup run? ---------------------------------------
+    If olInspectors Is Nothing Then
+        r = r & "1. Startup hook: NOT RUNNING" & vbCrLf & _
+                "   Application_Startup never fired, so opening a mail" & vbCrLf & _
+                "   triggers nothing. Cause is one of:" & vbCrLf & _
+                "     - macros blocked in Trust Center, or" & vbCrLf & _
+                "     - Outlook not restarted after saving the code." & vbCrLf & _
+                "   Workaround right now: run HookEvents (F5)." & vbCrLf
+    Else
+        r = r & "1. Startup hook: running" & vbCrLf
+    End If
+
+    '-- 2. Destination folder -------------------------------------------------
+    dest = ExpandEnv(SAVE_FOLDER)
     On Error Resume Next
-    If TypeOf Item Is Outlook.MailItem Then HandleMail Item
+    Err.Clear
+    EnsureFolder dest
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(dest) Then
+        r = r & "2. Folder: CANNOT CREATE" & vbCrLf & "   " & dest & vbCrLf
+    Else
+        tmp = dest & "\_writetest.tmp"
+        Err.Clear
+        fso.CreateTextFile(tmp, True).Close
+        If Err.Number <> 0 Then
+            r = r & "2. Folder: NOT WRITABLE (" & Err.Number & " " & _
+                    Err.Description & ")" & vbCrLf
+            Err.Clear
+        Else
+            fso.DeleteFile tmp, True
+            r = r & "2. Folder: writable" & vbCrLf
+        End If
+    End If
+
+    '-- 3. Word automation ----------------------------------------------------
+    Err.Clear
+    Set wd = GetObject(, "Word.Application")
+    If wd Is Nothing Then
+        Err.Clear
+        Set wd = CreateObject("Word.Application")
+        startedWord = True
+    End If
+
+    If wd Is Nothing Then
+        r = r & "3. Word: UNAVAILABLE (" & Err.Number & " " & Err.Description & ")" & vbCrLf & _
+                "   No Word means no PDF -- this method needs it." & vbCrLf
+        Err.Clear
+    Else
+        r = r & "3. Word: version " & wd.Version & " OK" & vbCrLf
+        If startedWord Then wd.Quit 0
+        Set wd = Nothing
+    End If
+
+    '-- 4. The selected message ----------------------------------------------
+    Err.Clear
+    Set sel = Application.ActiveExplorer.Selection
+    If Not sel Is Nothing Then
+        If sel.Count > 0 Then Set m = sel.Item(1)
+    End If
+    Err.Clear
+
+    If m Is Nothing Then
+        r = r & vbCrLf & "4. No message selected." & vbCrLf & _
+                "   Select a confidential email, then run this again." & vbCrLf
+    ElseIf Not TypeOf m Is Outlook.MailItem Then
+        r = r & vbCrLf & "4. Selected item is not an email." & vbCrLf
+    Else
+        r = r & vbCrLf & "4. Selected message:" & vbCrLf & _
+                "   Sensitivity  = " & m.Sensitivity & "   (3 = Confidential)" & vbCrLf & _
+                "   Permission   = " & SafeGetPermission(m) & "   (0 = unrestricted)" & vbCrLf & _
+                "   MessageClass = " & m.MessageClass & vbCrLf & _
+                "   Label        = " & Left$(IIf(Len(GetLabelString(m)) = 0, _
+                                        "(none)", GetLabelString(m)), 120) & vbCrLf & _
+                "   -> confidential? " & IsConfidential(m) & vbCrLf & _
+                "   -> protected?    " & IsRightsProtected(m) & vbCrLf
+
+        '-- 5. Real export attempt -------------------------------------------
+        gLastReason = ""
+        ExportMail m, False
+        r = r & vbCrLf & "5. Export attempt:" & vbCrLf & "   " & gLastReason & vbCrLf
+    End If
+
+    r = r & vbCrLf & "Log: " & ExpandEnv(LOG_FILE)
+
+    LogLine "DIAGNOSTICS" & vbCrLf & r
+    If Len(r) > 1020 Then r = Left$(r, 1020) & vbCrLf & "... (full text in log)"
+    MsgBox r, vbInformation, "PDF export diagnostics"
+End Sub
+
+Public Sub OpenLog()
+    On Error Resume Next
+    Shell "notepad.exe """ & ExpandEnv(LOG_FILE) & """", vbNormalFocus
 End Sub
 
 
@@ -112,8 +248,8 @@ End Sub
 ' Manual commands -- add these to the ribbon or run from the VBA editor
 '==============================================================================
 
-' Export whatever is selected in the message list, ignoring the Confidential
-' test. Useful for backfilling mail that arrived before the macro existed.
+' Export whatever is selected, ignoring the Confidential test. Use it to
+' backfill mail that arrived before the macro existed.
 Public Sub ExportSelectedToPdf()
     Dim sel As Outlook.Selection, i As Long, n As Long
     On Error Resume Next
@@ -138,39 +274,33 @@ Public Sub ExportSelectedToPdf()
            ExpandEnv(SAVE_FOLDER), vbInformation
 End Sub
 
-' Tell me why a message did or did not match, without exporting it.
-Public Sub WhyNotSelected()
-    Dim m As Outlook.MailItem
-    On Error Resume Next
-    Set m = Application.ActiveExplorer.Selection.Item(1)
-    On Error GoTo 0
-    If m Is Nothing Then Exit Sub
-
-    MsgBox "Subject:      " & m.Subject & vbCrLf & _
-           "Sensitivity:  " & m.Sensitivity & "  (3 = Confidential)" & vbCrLf & _
-           "Permission:   " & SafeGetPermission(m) & "  (0 = unrestricted)" & vbCrLf & _
-           "MessageClass: " & m.MessageClass & vbCrLf & vbCrLf & _
-           "Label string:" & vbCrLf & _
-           IIf(Len(GetLabelString(m)) = 0, "(none)", GetLabelString(m)) & vbCrLf & vbCrLf & _
-           "Confidential: " & IsConfidential(m) & vbCrLf & _
-           "Protected:    " & IsRightsProtected(m), vbInformation
-End Sub
-
 
 '==============================================================================
 ' Core
 '==============================================================================
 
 Private Sub HandleMail(ByVal Mail As Outlook.MailItem)
-    On Error Resume Next
+    On Error GoTo Fail
 
     ' NewInspector also fires for a message you are COMPOSING. Marking a draft
-    ' Confidential as you write it would otherwise export the half-finished
-    ' text. .Sent is False only for drafts, so this keeps us to real mail.
-    If Mail.Sent = False Then Exit Sub
+    ' Confidential as you write it would otherwise export half-finished text.
+    ' .Sent is False only for drafts.
+    If Mail.Sent = False Then
+        LogLine "skipped: draft being composed"
+        Exit Sub
+    End If
 
-    If Not IsConfidential(Mail) Then Exit Sub
+    If Not IsConfidential(Mail) Then
+        LogLine "skipped: not confidential. Sensitivity=" & Mail.Sensitivity & _
+                " label=" & Left$(GetLabelString(Mail), 120)
+        Exit Sub
+    End If
+
     ExportMail Mail, False
+    Exit Sub
+
+Fail:
+    LogLine "HandleMail ERROR " & Err.Number & ": " & Err.Description
 End Sub
 
 Private Function ExportMail(ByVal Mail As Outlook.MailItem, _
@@ -181,7 +311,9 @@ Private Function ExportMail(ByVal Mail As Outlook.MailItem, _
     On Error GoTo Fail
 
     If SKIP_RIGHTS_PROTECTED And IsRightsProtected(Mail) Then
-        LogLine "skipped (rights-protected): " & Mail.Subject
+        gLastReason = "SKIPPED: rights-protected (encrypted / Do Not Forward)." & _
+                      " Set SKIP_RIGHTS_PROTECTED = False to attempt anyway."
+        LogLine gLastReason
         Exit Function
     End If
 
@@ -194,7 +326,8 @@ Private Function ExportMail(ByVal Mail As Outlook.MailItem, _
     ' does not produce a second copy.
     Set fso = CreateObject("Scripting.FileSystemObject")
     If fso.FileExists(pdf) Then
-        LogLine "already exported: " & pdf
+        gLastReason = "SKIPPED: PDF already exists -- " & pdf
+        LogLine gLastReason
         ExportMail = Forced
         Exit Function
     End If
@@ -209,7 +342,8 @@ Private Function ExportMail(ByVal Mail As Outlook.MailItem, _
     fso.DeleteFile mht, True
     On Error GoTo Fail
 
-    LogLine "exported: " & pdf
+    gLastReason = "OK: wrote " & pdf
+    LogLine gLastReason
     ExportMail = True
     Exit Function
 
@@ -221,7 +355,9 @@ Fail:
     On Error Resume Next
     subj = Mail.Subject
 
-    LogLine "FAILED (" & eNum & " " & eDesc & "): " & subj
+    gLastReason = "ERROR " & eNum & ": " & eDesc
+    LogLine gLastReason & "  [" & subj & "]"
+
     If Len(mht) > 0 Then CreateObject("Scripting.FileSystemObject").DeleteFile mht, True
 
     If Forced Then
